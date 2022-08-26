@@ -1,18 +1,14 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
+using LiteDB;
+using Newtonsoft.Json;
 using System.Net;
-using System.Text;
-using System.Threading.Tasks;
+using System.Reflection;
+using System.Text.RegularExpressions;
 using Titanium.Web.Proxy;
 using Titanium.Web.Proxy.EventArguments;
 using Titanium.Web.Proxy.Models;
-using Titanium.Web.Proxy.Network;
-using System.Security.Cryptography.X509Certificates;
-using System.IO;
-using System.Reflection;
 
-namespace ExternalLogger
+
+namespace AvatarLogger
 {
     internal class main
     {
@@ -42,52 +38,9 @@ namespace ExternalLogger
 
         public static void Main(string[] args)
         {
-            Console.WriteLine("simple external vrchat avatar logger by unixian");
-            Console.WriteLine("if this is your first time launching, you will be prompted to install a root certificate.");
-            Console.WriteLine("install it to allow the external logger to decrypt HTTPS data from vrchat.\n");
-
-            bool provided_command = false;
-            if (args.Length > 0)
-            {
-                var arg = args[0];
-
-                switch (arg)
-                {
-                    case "-download":
-                        provided_command = true;
-                        download = true;
-                        break;
-
-                    case "-log":
-                        provided_command = true;
-                        break;
-
-                    default:
-                        Console.WriteLine("You provided an invalid command, the program will continue as normal.\n");
-                        Console.WriteLine("Reminder: the only available commands is -download and -log.");
-                        break;
-                }
-            }
-
-
-            if (provided_command == false)
-            {
-                Console.WriteLine("Would you like to download all logged avatars into a folder?");
-                Console.WriteLine($"Logged avatars will be saved to: \n{System.IO.Path.GetDirectoryName(Assembly.GetEntryAssembly().Location)}\\VRCA \n");
-                Console.WriteLine($"If you want to start the program with one of these options, append -download or -log before starting the app.");
-                Console.WriteLine("Enter a selection [y/n]: ");
-                var key = Console.ReadLine();
-                if (key.ToLower() == "y")
-                {
-                    download = true;
-                }
-                else if (key.ToLower() == "n")
-                {
-                    download = false;
-                }
-            }
-
-
+            Console.WriteLine("如果這是您第一次啟動，系統會提示您安裝根證書.");
+            Console.WriteLine("安裝它來允許外部記錄器從 vrchat 解密 HTTPS 數據.\n");
+            Console.WriteLine($"記錄的Avatar將保存到： \n{System.IO.Path.GetDirectoryName(Assembly.GetEntryAssembly().Location)}\\AvatarLog.db \n");
 
             SetupProxy();
 
@@ -95,73 +48,87 @@ namespace ExternalLogger
             ProxyServer.BeforeResponse += ProcessResponse;
             ProxyServer.ServerCertificateValidationCallback += ProcessCertValidation;
 
-            Console.WriteLine("\nfinished init, program will run as normal. press the enter key to exit whenever.");
+            Console.WriteLine("\n完成初始化，正在紀錄Avatar... 按Enter後可退出程序");
 
             Console.Read();
 
-            Console.WriteLine("\ncleaning up...");
+            Console.WriteLine("\n正在解除Proxy代理，關閉中...");
             Cleanup();
         }
 
 
         public static async Task ProcessRequest(object sender, SessionEventArgs e)
         {
+
+
             string url = e.HttpClient.Request.RequestUri.AbsoluteUri;
             if (!url.Contains("api.vrchat.cloud"))
             {
                 return;
             }
         }
+        private static readonly Regex fileRegex = new Regex("https://api.vrchat.cloud/api/1/file/file_[0-9a-fA-F]{8}\\-[0-9a-fA-F]{4}\\-[0-9a-fA-F]{4}\\-[0-9a-fA-F]{4}\\-[0-9a-fA-F]{12}");
+
+
+
 
         public static async Task ProcessResponse(object sender, SessionEventArgs e)
         {
             string url = e.HttpClient.Request.RequestUri.AbsoluteUri;
             if (url.Contains("https://api.vrchat.cloud/api/1/file/") && e.HttpClient.Response.StatusCode == 302)
             {
+                var fileURL = "";
+                foreach (Match match in fileRegex.Matches(url)) fileURL = (match.Value);
+
                 var download_link = e.HttpClient.Response.Headers.Headers["Location"];
                 var ext = System.IO.Path.GetExtension(download_link.ToString());
-
                 if (ext == ".vrca")
                 {
-                    var uri = new UriBuilder(download_link.ToString()).Uri;
-                    var index = uri.Segments[3].IndexOf("Asset");
-                    Console.WriteLine($"successfully logged avatar {uri.Segments[3].Substring(0, index)}");
+                    var httpClient = new HttpClient();
+                    httpClient.DefaultRequestHeaders.Add("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/103.0.0.0 Safari/537.36");
+                    var avatarData = await httpClient.GetStringAsync(fileURL);
+                    dynamic avatar = JsonConvert.DeserializeObject(avatarData);
 
-                    if (download)
+                    string AvatarId = avatar.id;
+                    if (string.IsNullOrEmpty(AvatarId))
                     {
-                        if (!Directory.Exists($"{System.IO.Path.GetDirectoryName(Assembly.GetEntryAssembly().Location)}\\VRCA"))
-                        {
-                            Directory.CreateDirectory($"{System.IO.Path.GetDirectoryName(Assembly.GetEntryAssembly().Location)}\\VRCA");
-                        }
-
-                        var client = new HttpClient();
-                        DownloadAvatar(uri, client);
+                        return;
                     }
-                    else
+                    using (LiteDatabase liteDatabase = new LiteDatabase("AvatarLog.db", null))
                     {
-                        if (!Directory.Exists($"{System.IO.Path.GetDirectoryName(Assembly.GetEntryAssembly().Location)}\\VRCA"))
+                        ILiteCollection<Customer> collection = liteDatabase.GetCollection<Customer>("Avatar", BsonAutoId.ObjectId);
+                        if (collection.Find((Customer x) => x.AvatarId == AvatarId, 0, 2147483647).DefaultIfEmpty(null).Single<Customer>() == null)
                         {
-                            Directory.CreateDirectory($"{System.IO.Path.GetDirectoryName(Assembly.GetEntryAssembly().Location)}\\VRCA");
-                        }
+                            string name = avatar.name.ToString();
+                            string assetUrl = fileURL;
+                            string authorId = avatar.ownerId;
 
-                        if (!File.Exists($"{System.IO.Path.GetDirectoryName(Assembly.GetEntryAssembly().Location)}\\VRCA\\log.txt"))
-                        {
-                            File.CreateText($"{System.IO.Path.GetDirectoryName(Assembly.GetEntryAssembly().Location)}\\VRCA\\log.txt").Close();
-                        }
 
-                        using (StreamWriter w = File.AppendText($"{System.IO.Path.GetDirectoryName(Assembly.GetEntryAssembly().Location)}\\VRCA\\log.txt"))
-                        {
-                            await w.WriteLineAsync($"{System.Web.HttpUtility.UrlDecode(uri.AbsolutePath).Trim()} : {uri.Segments[3].Substring(0, index)}");
+
+                            Customer entity = new Customer
+                            {
+                                Name = name,
+                                assetUrl = assetUrl,
+                                AvatarId = AvatarId,
+                                AuthorId = authorId,
+                            };
+                            collection.Insert(entity);
+
+                            collection.EnsureIndex<string>((Customer x) => x.AvatarId, false);
+
                         }
                     }
                 }
+
             }
         }
-
-        private static async void DownloadAvatar(Uri uri, HttpClient client)
+        public class Customer
         {
-            var data = await client.GetByteArrayAsync(System.Web.HttpUtility.UrlDecode(uri.AbsolutePath).Trim());
-            await File.WriteAllBytesAsync($"{System.IO.Path.GetDirectoryName(Assembly.GetEntryAssembly().Location)}\\VRCA\\{uri.Segments[3]}", data);
+            public int Id { get; set; }
+            public string Name { get; set; }
+            public string assetUrl { get; set; }
+            public string AvatarId { get; set; }
+            public string AuthorId { get; set; }
         }
 
         public static Task ProcessCertValidation(object sender, CertificateValidationEventArgs e)
